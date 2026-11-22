@@ -12,6 +12,8 @@ field and saves the device's dataset format), then --from-template, which
 sends the pending dataset as the first command after connecting.
 
 Copyright (c) 2026 CamelusBactrianus
+Version 1.2 changes steered by SSchott, written by Claude (Anthropic)
+in Claude Code.
 SPDX-License-Identifier: MIT
 """
 __version__ = "1.2"

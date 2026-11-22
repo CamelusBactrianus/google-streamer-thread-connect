@@ -2,7 +2,7 @@
 
 `thread_join.py` moves a Thread 1.4 border router, such as a **Google TV Streamer (4K)**, off the Thread network it created for itself and onto an existing Thread network, such as the one run by Home Assistant's OpenThread Border Router (OTBR). It uses the Streamer's own **Share Thread network credentials** feature. You don't need to reset anything, change the Home Assistant network, or re-pair your existing Thread devices.
 
-> **Unofficial and unsupported.** Google, Nabu Casa, and the OpenThread project don't provide or support this. It worked for the author, but it could stop working with any firmware update. Read the [warnings](#warnings) before using it.
+> **Unofficial and unsupported.** Google, Nabu Casa, and the OpenThread project don't provide or support this. It worked for the author, and version 1.2 was tested on a second setup, but it could stop working with any firmware update. Read the [warnings](#warnings) before using it.
 
 ## The problem this solves
 
@@ -17,7 +17,7 @@ A 2026 firmware update added Thread 1.4 **credential sharing** to the Streamer: 
 3. The script finds the Streamer using mDNS (`_meshcop-e._udp`) and connects to it with OpenThread's `commissioner-cli`, using the code as the key for the secure connection.
 4. It reads the Streamer's current dataset. If the Streamer is already on your network, it stops there.
 5. It builds a pending dataset with your network's channel, PAN ID, extended PAN ID, network name, network key, PSKc, mesh-local prefix, security policy, and channel mask, plus a newer active timestamp.
-6. **Field check (1.2):** it compares the field *names* (never the values) of your dataset, the Streamer's dataset, and the pending dataset. It continues only if the pending dataset contains exactly your network's fields, so nothing from the Streamer's own dataset can be carried over and spread to your network.
+6. **Field check** (1.2): it compares the field *names* (never the values) of your dataset, the Streamer's dataset, and the pending dataset. It continues only if the pending dataset contains exactly your network's fields, so nothing from the Streamer's own dataset can be carried over and spread to your network.
 7. It sends the pending dataset to the Streamer.
 8. After the delay (the Streamer enforces a **5-minute minimum**), the Streamer switches over. The script then checks the Streamer's mDNS advertisement to confirm it's now on your network.
 
@@ -169,7 +169,7 @@ Recommended (1.2), with a **new code from the device for each run**:
 ./thread_join.py --from-template    # the real run
 ```
 
-The original one-step run still works where the device allows it:
+The original one-step run (as in 1.1) still works where the device allows it:
 
 ```bash
 ./thread_join.py
@@ -259,7 +259,7 @@ Confirmed: the device is now advertising 'ha-thread-abcd'.
 - **Unofficial.** This relies on current Google firmware behavior. A future update could block it or change how it behaves.
 - **The sharing code is effectively an admin password** for the device's Thread network while it's valid. Only use it on a computer and network you trust.
 - **The dataset TLV contains your network key.** The script keeps it in memory and in a private temporary folder that's deleted when it exits. Don't save it anywhere shared, and don't post it.
-- **The whole Google Thread network moves, not just the Streamer.** A pending dataset applies to every device on the device's current network. If other Google border routers (Nest Hubs, Nest Wifi Pro) or Thread devices are on that `Google-XXXX` network, they'll be moved to your network too. The author only tested this with Streamers that had no other devices on their network. Thread has no way for a commissioner to move just one device: the dataset belongs to the whole network. An **untested** workaround is to isolate the Streamer first. Before generating the code, unplug the network's other border routers and powered devices, wait a few minutes so the Streamer takes over as leader of its own partition, run the script, and plug the other devices back in only after the switch is confirmed. They should then form the old Google network again without the Streamer. Battery-powered devices attached through the Streamer may drop off until they reattach, and Google Home may not handle this cleanly.
+- **The whole Google Thread network moves, not just the Streamer.** A pending dataset applies to every device on the device's current network. If other Google border routers (Nest Hubs, Nest Wifi Pro) or Thread devices are on that `Google-XXXX` network, they'll be moved to your network too. The author only tested this with Streamers that had no other devices on their network, and the same is true of the 1.2 test. Thread has no way for a commissioner to move just one device: the dataset belongs to the whole network. An **untested** workaround is to isolate the Streamer first. Before generating the code, unplug the network's other border routers and powered devices, wait a few minutes so the Streamer takes over as leader of its own partition, run the script, and plug the other devices back in only after the switch is confirmed. They should then form the old Google network again without the Streamer. Battery-powered devices attached through the Streamer may drop off until they reattach, and Google Home may not handle this cleanly.
 - **Never point this at a device that's already on your network.** The script checks this (by comparing extended PAN IDs) and stops. If you edit the script, keep that check. Without it, you could send a pending dataset to your entire HA network.
 - **Factory resets and re-setup will undo it.** Setting the device up again in Google Home will most likely create a new Google network. A Google account sync or firmware update might as well. Run the script again if that happens.
 - **Codes are single use and expire.** After 10 failed connection attempts with the same code, the device stops accepting it. Generate a new code for each attempt.
@@ -320,7 +320,7 @@ Note what triggered it (a reboot, an update, a Google Home change), then run the
 
 ## Changelog
 
-**1.2**
+**1.2** (steered by [SSchott](https://github.com/SSchott), written by Claude in Claude Code)
 - Field check: the pending dataset must contain exactly the destination network's fields. Only field names are printed.
 - Two-step mode: `--dry-run` saves the device's dataset format (secrets zeroed), and `--from-template` sends the pending dataset as the first command. This works around Streamers that close the session after the dataset is read.
 - New options `--from-template` and `--template`.
