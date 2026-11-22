@@ -7,10 +7,16 @@ OpenThread Border Router, using the device's ePSKc code
 
 Unofficial and unsupported. Use at your own risk. See README.md.
 
+Recommended flow (1.2): run --dry-run first (checks the dataset field for
+field and saves the device's dataset format), then --from-template, which
+sends the pending dataset as the first command after connecting.
+
 Copyright (c) 2026 CamelusBactrianus
+Version 1.2 changes steered by SSchott, written by Claude (Anthropic)
+in Claude Code.
 SPDX-License-Identifier: MIT
 """
-__version__ = "1.1"
+__version__ = "1.2"
 
 import argparse
 import getpass
@@ -127,6 +133,44 @@ def build_pending(ha, st):
     return p, keyname
 
 
+# Which commissioner JSON field each destination TLV maps to.
+TLV_FIELD = {0: 'Channel', 1: 'PanId', 2: 'ExtendedPanId', 3: 'NetworkName', 4: 'PSKc',
+             5: 'NetworkKey', 7: 'MeshLocalPrefix', 12: 'SecurityPolicy', 14: 'ActiveTimestamp',
+             53: 'ChannelMask'}
+# Fields the pending dataset carries by design, not copied from the destination.
+OWN_FIELDS = {'ActiveTimestamp', 'PendingTimestamp', 'DelayTimer'}
+
+
+def report_fields(ha, st, p):
+    """Print field names (no values) and return True only if the pending dataset
+    contains exactly the destination's fields plus the pending-only ones."""
+    norm = lambda k: 'NetworkKey' if k == 'NetworkMasterKey' else k
+    unknown_tlv = sorted(t for t in ha if t not in TLV_FIELD)
+    dest = {TLV_FIELD[t] for t in ha if t in TLV_FIELD} | {'ActiveTimestamp'}
+    pend = {norm(k) for k in p}
+    extra = sorted(pend - dest - OWN_FIELDS)    # would be copied from the device
+    missing = sorted(dest - pend)               # destination has it, pending lacks it
+
+    ha_sec = int.from_bytes(ha[14], 'big') >> 16 if 14 in ha else None
+    print('Destination TLV types: ' + ', '.join(str(t) for t in sorted(ha)))
+    print("Device's active dataset fields: " + ', '.join(sorted(st)))
+    print('Pending dataset fields:         ' + ', '.join(sorted(p)))
+    print(f"Active timestamps (seconds): destination={ha_sec}, "
+          f"device={st.get('ActiveTimestamp', {}).get('Seconds')}, "
+          f"pending={p['ActiveTimestamp']['Seconds']}")
+    if unknown_tlv:
+        print('PROBLEM: destination TLV types this script cannot carry over: '
+              + ', '.join(map(str, unknown_tlv)))
+    if extra:
+        print('PROBLEM: fields that would be copied from the device, not the destination: '
+              + ', '.join(extra))
+    if missing:
+        print('PROBLEM: destination fields missing from the pending dataset: ' + ', '.join(missing))
+    good = not (unknown_tlv or extra or missing)
+    print('Field check: ' + ('OK, pending dataset matches the destination' if good else 'FAILED'))
+    return good
+
+
 # ------------------------------------------------------------------- mDNS --
 
 def props_of(info):
@@ -159,19 +203,51 @@ def find_epskc(wait=8):
 
 def meshcop_xpan(instance):
     """Extended PAN ID a device advertises on its normal _meshcop service."""
+    return meshcop_state(instance)[0]
+
+
+def meshcop_state(instance):
+    """(extended PAN ID hex, active timestamp seconds) from the device's _meshcop service."""
+    # Browse first. The Streamer ignores a cold SRV/TXT query from a
+    # fresh Zeroconf instance, but answers once a browse has warmed the cache.
     name = instance.split('._meshcop-e.')[0] + '._meshcop._udp.local.'
     try:
         zc = Zeroconf()
         try:
+            ServiceBrowser(zc, '_meshcop._udp.local.', handlers=[lambda **kw: None])
+            time.sleep(4)
             info = zc.get_service_info('_meshcop._udp.local.', name, 8000)
         finally:
             zc.close()
     except Exception:
-        return None
+        return None, None
     if not info:
-        return None
-    xp = props_of(info).get('xp')
-    return xp.hex() if isinstance(xp, bytes) else None
+        return None, None
+    pr = props_of(info)
+    xp, at = pr.get('xp'), pr.get('at')
+    return (xp.hex() if isinstance(xp, bytes) else None,
+            int.from_bytes(at, 'big') >> 16 if isinstance(at, bytes) and len(at) == 8 else None)
+
+
+# --------------------------------------------------------------- template --
+# Some Streamers end the ePSKc session as soon as the active dataset has been
+# read, before MGMT_PENDING_SET can be sent. The dry run therefore saves the
+# device's dataset *format* (secrets zeroed), and --from-template sends the
+# pending dataset as the first command, without reading the dataset again.
+SECRET_FIELDS = ('NetworkMasterKey', 'NetworkKey', 'PSKc')
+
+
+def save_template(st, path):
+    t = json.loads(json.dumps(st))
+    for k in SECRET_FIELDS:
+        if k in t:
+            # keep length, prefix and letter case (build_pending copies the format)
+            t[k] = re.sub(r'[0-9a-fA-F]', lambda m: '0' if m[0].isdigit() else ('A' if m[0].isupper() else 'a'),
+                          str(t[k])) if isinstance(t[k], str) else 0
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        json.dump(t, f, indent=1)
+    print(f'Saved dataset format template (key and PSKc zeroed) to {path}')
 
 
 # ------------------------------------------------------------ commissioner --
@@ -227,6 +303,11 @@ def main():
     ap.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
     ap.add_argument('--dry-run', action='store_true',
                     help='connect and show which network the device is on, but change nothing')
+    ap.add_argument('--template', default='streamer_template.json',
+                    help='where --dry-run saves the device dataset format (default: %(default)s)')
+    ap.add_argument('--from-template', action='store_true',
+                    help="don't read the device dataset; use the template saved by --dry-run, "
+                         'check the device via mDNS, and send the pending dataset right after connecting')
     ap.add_argument('--no-confirm', action='store_true',
                     help="don't wait to confirm the switch via mDNS afterwards")
     ap.add_argument('--debug', action='store_true',
@@ -271,6 +352,33 @@ def main():
         print('Note: only an IPv6 address was found; link-local addresses may not work.')
     print(f'Using {name} at {ip}:{port}')
 
+    tmpl = None
+    if args.from_template:
+        if args.dry_run:
+            die('--from-template and --dry-run cannot be combined')
+        try:
+            with open(args.template) as f:
+                tmpl = json.load(f)
+        except (OSError, ValueError) as e:
+            die(f'could not load the template {args.template}: {e}. Run --dry-run first.')
+        cur_xp, cur_at = meshcop_state(name)
+        t_xp = str(tmpl.get('ExtendedPanId', '')).lower().removeprefix('0x')
+        t_at = tmpl.get('ActiveTimestamp', {}).get('Seconds')
+        print(f"Device advertises xp={cur_xp}, active timestamp={cur_at}; "
+              f"template has xp={t_xp}, active timestamp={t_at}")
+        if not cur_xp or cur_at is None:
+            die("couldn't read the device's network from mDNS; stopping to be safe")
+        # Safety: never push a pending dataset into the destination network itself.
+        if cur_xp.lower() == xpan.lower():
+            print(f"This device is already on '{net}'. Nothing to do.")
+            return
+        if cur_xp.lower() != t_xp or cur_at != t_at:
+            die('the device is no longer on the network the template was saved from; '
+                'run --dry-run again to refresh the template')
+        p, keyname = build_pending(ha, tmpl)
+        if not report_fields(ha, tmpl, p):
+            die('the pending dataset would not match the destination dataset field for field')
+
     delay, verified = DELAY_MS // 1000, True
     with tempfile.TemporaryDirectory() as tmp:
         os.chmod(tmp, 0o700)
@@ -307,24 +415,31 @@ def main():
                 fail('commissioner did not become active', out)
             print('Connected as commissioner.')
 
-            ok, out = c.run(f'opdataset get active --export {stf}')
-            if not ok or not os.path.exists(stf):
-                fail('could not read the device dataset', out)
-            with open(stf) as f:
-                st = json.load(f)
-            cur_name = st.get('NetworkName')
+            if tmpl is None:
+                ok, out = c.run(f'opdataset get active --export {stf}')
+                if not ok or not os.path.exists(stf):
+                    fail('could not read the device dataset', out)
+                with open(stf) as f:
+                    st = json.load(f)
+                cur_name = st.get('NetworkName')
 
-            # Safety: never push a pending dataset into the destination network itself.
-            if str(st.get('ExtendedPanId', '')).lower() == xpan.lower():
-                print(f"This device is already on '{net}'. Nothing to do.")
-                return
-            print(f"Device is on '{cur_name}' (channel {chan(st)}).")
-            if args.dry_run:
-                print('Dry run: no changes made.')
-                return
+                # Safety: never push a pending dataset into the destination network itself.
+                if str(st.get('ExtendedPanId', '')).lower().removeprefix('0x') == xpan.lower():
+                    print(f"This device is already on '{net}'. Nothing to do.")
+                    return
+                print(f"Device is on '{cur_name}' (channel {chan(st)}).")
+                # Safety: the pending dataset must carry exactly the
+                # destination's fields. Report field NAMES only, never values.
+                p, keyname = build_pending(ha, st)
+                ok_dataset = report_fields(ha, st, p)
+                if args.dry_run:
+                    save_template(st, args.template)
+                    print('Dry run: no changes made.')
+                    return
+                if not ok_dataset:
+                    fail('the pending dataset would not match the destination dataset field for field; '
+                         'stopping so these fields cannot spread to the destination network')
             print(f"Moving it to '{net}'...")
-
-            p, keyname = build_pending(ha, st)
             with open(pf, 'w') as f:
                 json.dump(p, f)
             ok, out = c.run(f'opdataset set pending --import {pf}')
